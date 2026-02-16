@@ -1,0 +1,66 @@
+{{- if .Values.postgresql.cnpg.enabled }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: runboat-db-superuser
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "runboat.labels" . | nindent 4 }}
+type: kubernetes.io/basic-auth
+stringData:
+  username: postgres
+  password: {{ .Values.postgresql.cnpg.superuserPassword | quote }}
+---
+## App user secret — CNPG uses this for the DB owner instead of auto-generating
+apiVersion: v1
+kind: Secret
+metadata:
+  name: runboat-db-app
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "runboat.labels" . | nindent 4 }}
+    cnpg.io/reload: "true"
+type: kubernetes.io/basic-auth
+stringData:
+  username: {{ .Values.postgresql.user | quote }}
+  password: {{ .Values.postgresql.password | quote }}
+  dbname: runboat
+  host: {{ include "runboat.dbHost" . }}
+  port: {{ .Values.postgresql.port | quote }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: runboat-db
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "runboat.labels" . | nindent 4 }}
+spec:
+  imageName: {{ .Values.postgresql.cnpg.image | quote }}
+  {{- with .Values.postgresql.cnpg.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  instances: {{ .Values.postgresql.cnpg.instances }}
+  storage:
+    size: {{ .Values.postgresql.cnpg.storage.size }}
+    {{- if .Values.postgresql.cnpg.storage.storageClass }}
+    storageClass: {{ .Values.postgresql.cnpg.storage.storageClass }}
+    {{- end }}
+  postgresql:
+    parameters:
+      {{- toYaml .Values.postgresql.cnpg.parameters | nindent 6 }}
+  enableSuperuserAccess: true
+  superuserSecret:
+    name: runboat-db-superuser
+  bootstrap:
+    initdb:
+      database: runboat
+      owner: {{ .Values.postgresql.user }}
+      secret:
+        name: runboat-db-app
+      postInitApplicationSQL:
+        - ALTER ROLE {{ .Values.postgresql.user }} CREATEDB
+  resources:
+    {{- toYaml .Values.postgresql.cnpg.resources | nindent 4 }}
+{{- end }}

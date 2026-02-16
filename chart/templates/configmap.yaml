@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "runboat.fullname" . }}-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "runboat.labels" . | nindent 4 }}
+data:
+  RUNBOAT_BUILD_NAMESPACE: {{ .Values.buildNamespace | quote }}
+  RUNBOAT_BUILD_DOMAIN: {{ .Values.config.buildDomain | quote }}
+  RUNBOAT_BASE_URL: {{ .Values.config.baseUrl | quote }}
+  RUNBOAT_GITLAB_URL: {{ .Values.gitlab.url | quote }}
+  RUNBOAT_MAX_INITIALIZING: {{ .Values.config.maxInitializing | quote }}
+  RUNBOAT_MAX_STARTED: {{ .Values.config.maxStarted | quote }}
+  RUNBOAT_MAX_DEPLOYED: {{ .Values.config.maxDeployed | quote }}
+  RUNBOAT_NO_CLEANUP_JOB: {{ .Values.config.noCleanupJob | quote }}
+  RUNBOAT_DISABLE_COMMIT_STATUSES: {{ .Values.config.disableCommitStatuses | quote }}
+  RUNBOAT_ADDITIONAL_FOOTER_HTML: {{ .Values.config.additionalFooterHtml | quote }}
+  RUNBOAT_BUILD_ENV: {{ include "runboat.buildEnv" . | squote }}
+  RUNBOAT_BUILD_TEMPLATE_VARS: {{ include "runboat.buildTemplateVars" . | squote }}
+  RUNBOAT_REPOS: {{ include "runboat.repos" . | squote }}
