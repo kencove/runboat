@@ -38,7 +38,7 @@ oca_wait_for_postgres
 # --db_user is necessary for Odoo <= 10
 unbuffer $(which odoo || which openerp-server) \
   --data-dir=/mnt/data/odoo-data-dir \
-  --db-filter=^${PGDATABASE} \
+  --db-filter='^${PGDATABASE}$$' \
   --db_user=${PGUSER} \
   --smtp=localhost \
   --smtp-port=1025

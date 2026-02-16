@@ -1,0 +1,244 @@
+## ---------------------------------------------------------------
+## Runboat Helm Chart — values.yaml
+## ---------------------------------------------------------------
+## Deploy Runboat (K8s operator for Odoo review environments) with
+## support for GitHub and/or GitLab webhooks.
+## ---------------------------------------------------------------
+
+## ---------------------------------------------------------------
+## Controller image
+## ---------------------------------------------------------------
+image:
+  repository: ghcr.io/your-org/runboat
+  tag: latest
+  pullPolicy: Always
+
+## If your image is in a private registry, list pull secrets here.
+## The secret must exist in the runboat namespace.
+imagePullSecrets: []
+  # - name: my-registry-secret
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+## ---------------------------------------------------------------
+## Namespaces
+## ---------------------------------------------------------------
+## namespace: where Runboat controller runs
+## buildNamespace: where per-build K8s resources are created
+namespace: runboat
+buildNamespace: runboat-builds
+
+## ---------------------------------------------------------------
+## Ingress for the Runboat UI / API
+## ---------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  host: runboat.example.com
+  annotations:
+    ## cert-manager will auto-provision a TLS certificate:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: 10m
+  tls:
+    enabled: true
+    secretName: runboat-tls
+
+## ---------------------------------------------------------------
+## TLS for per-build ingresses (wildcard certificate)
+## ---------------------------------------------------------------
+## Builds get URLs like <slug>.runboat.example.com.
+## Create a wildcard Certificate CR in the builds namespace so all
+## build ingresses share one cert:
+##
+##   apiVersion: cert-manager.io/v1
+##   kind: Certificate
+##   metadata:
+##     name: runboat-builds-wildcard
+##     namespace: runboat-builds          # must match buildNamespace
+##   spec:
+##     secretName: runboat-builds-wildcard-tls
+##     dnsNames:
+##       - "*.runboat.example.com"
+##     issuerRef:
+##       kind: ClusterIssuer
+##       name: letsencrypt-prod           # must support DNS-01
+##
+## The kubefiles reference this secret automatically:
+##   spec.tls[].secretName: runboat-builds-wildcard-tls
+##
+## NOTE: Wildcard certs require a DNS-01 solver (e.g. Cloudflare,
+## Route53, DigitalOcean). HTTP-01 cannot issue wildcards.
+## ---------------------------------------------------------------
+
+## ---------------------------------------------------------------
+## RBAC
+## ---------------------------------------------------------------
+## Runboat needs permissions to create/delete Deployments, Jobs,
+## Services, Ingresses, PVCs, Secrets, ConfigMaps in the builds
+## namespace.
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: runboat
+
+## ---------------------------------------------------------------
+## PostgreSQL for builds (shared instance)
+## ---------------------------------------------------------------
+## Runboat creates/drops a database per build on this shared PG.
+## Options:
+##   1. cnpg.enabled: true  — deploy a CNPG Cluster CR (requires
+##      the CNPG operator: kubectl apply -f https://github.com/
+##      cloudnative-pg/cloudnative-pg/releases/latest)
+##   2. cnpg.enabled: false — use an external PostgreSQL
+## ---------------------------------------------------------------
+postgresql:
+  cnpg:
+    enabled: true
+    instances: 1
+    image: "ghcr.io/cloudnative-pg/postgresql:16"
+    imagePullSecrets: []
+      # - name: my-registry-secret
+    storage:
+      size: 20Gi
+      storageClass: ""   # "" = cluster default; e.g. "do-block-storage"
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+    parameters:
+      archive_mode: "off"
+      shared_buffers: 256MB
+      max_connections: "200"
+    ## Superuser password — CHANGE THIS in your values override
+    superuserPassword: CHANGE_ME
+
+  ## Connection details (auto-derived from CNPG when cnpg.enabled)
+  ## Override these when using an external PostgreSQL.
+  host: ""        # auto: runboat-db-rw.<namespace>.svc.cluster.local
+  port: "5432"
+  user: runboat
+  password: CHANGE_ME
+
+## ---------------------------------------------------------------
+## Build storage — each build gets a PVC for addons, venv, filestore
+## ---------------------------------------------------------------
+buildStorage:
+  storageClassName: ""   # "" = cluster default; e.g. "do-block-storage"
+
+## ---------------------------------------------------------------
+## Runboat configuration
+## ---------------------------------------------------------------
+config:
+  ## API admin credentials (used for trigger endpoints)
+  apiAdminUser: admin
+  apiAdminPassword: CHANGE_ME
+
+  ## Build concurrency limits
+  maxInitializing: 2    # max concurrent init jobs
+  maxStarted: 4         # max running Odoo instances (others scale to 0)
+  maxDeployed: 20       # max total builds (oldest stopped get deleted)
+
+  ## Domain for build ingresses: <slug>.<buildDomain>
+  buildDomain: runboat.example.com
+
+  ## Runboat UI base URL (for backlinks in commit statuses)
+  baseUrl: https://runboat.example.com
+
+  ## Skip cleanup jobs — just delete K8s resources on undeploy
+  noCleanupJob: false
+
+  ## Disable posting commit statuses to GitHub/GitLab
+  disableCommitStatuses: false
+
+  ## Additional footer HTML for the web UI
+  additionalFooterHtml: ""
+
+  ## Extra env vars injected into every build container/job.
+  ## These are non-secret and stored in a ConfigMap.
+  buildEnv: {}
+    # PGHOST: runboat-db-rw.runboat.svc.cluster.local
+    # PGPORT: "5432"
+    # PGUSER: runboat
+
+  ## Secret env vars injected into every build container/job.
+  ## Stored in a K8s Secret. Use for DB password, API tokens, etc.
+  buildSecretEnv: {}
+    # PGPASSWORD: my-db-password
+    # RUNBOAT_GITLAB_TOKEN: glpat-xxxxx
+
+  ## Template vars for kubefiles Jinja rendering
+  buildTemplateVars: {}
+    # storageClassName: do-block-storage
+
+## ---------------------------------------------------------------
+## GitHub configuration
+## ---------------------------------------------------------------
+## token: Personal Access Token with repo + statuses scope.
+##        Used to fetch branch/PR info and post commit statuses.
+## webhookSecret: HMAC secret for verifying GitHub webhook payloads.
+##                Set the same value in the GitHub repo webhook config.
+github:
+  token: ""
+  webhookSecret: ""
+
+## ---------------------------------------------------------------
+## GitLab configuration (new — works alongside GitHub)
+## ---------------------------------------------------------------
+## token: Project Access Token or PAT with api + read_repository scope.
+##        Used to fetch branch/MR info, post commit statuses, and
+##        download repo archives for private repos.
+## webhookToken: Plain token for X-Gitlab-Token header verification.
+##               Set the same value in the GitLab project webhook config.
+## url: Base URL of your GitLab instance. Defaults to gitlab.com.
+##      Change for self-hosted: https://gitlab.mycompany.com
+gitlab:
+  token: ""
+  webhookToken: ""
+  url: https://gitlab.com
+
+## ---------------------------------------------------------------
+## Repository configuration
+## ---------------------------------------------------------------
+## Each entry defines a repo pattern, branch pattern, build image,
+## and optionally platform + project_id for GitLab repos.
+##
+## Fields:
+##   repo:       Regex matched against incoming webhook repo path
+##   branch:     Regex matched against target branch
+##   platform:   "github" (default) or "gitlab"
+##   project_id: GitLab numeric project ID (required for gitlab)
+##   builds:     List with exactly one build config:
+##     image:          Container image for the build
+##     env:            Extra env vars (extends config.buildEnv)
+##     secret_env:     Extra secret env vars
+##     template_vars:  Extra template vars
+##     kubefiles_path: Override kubefiles directory
+## ---------------------------------------------------------------
+repos: []
+  ## GitHub example — OCA repos:
+  # - repo: "^oca/.*"
+  #   branch: "^16\\.0$"
+  #   platform: github
+  #   builds:
+  #     - image: "ghcr.io/oca/oca-ci/py3.10-odoo16.0:latest"
+
+  ## GitLab example — private Odoo addon repo:
+  # - repo: "^myorg/odoo/addons/myrepo$"
+  #   branch: "^16\\.0.*$"
+  #   platform: gitlab
+  #   project_id: "12345678"
+  #   builds:
+  #     - image: "ghcr.io/oca/oca-ci/py3.10-odoo16.0:latest"

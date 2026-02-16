@@ -1,0 +1,93 @@
+name: Build, Test & Push
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: us-central1-docker.pkg.dev
+  IMAGE: us-central1-docker.pkg.dev/kencove-prod/kencove-docker-repo/runboat
+  CHART_REPO: oci://us-central1-docker.pkg.dev/kencove-prod/kencove-docker-repo
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: pip install -e ".[test]"
+      - name: Run tests
+        run: pytest tests/ -v
+
+  build-image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for GCP Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Set image tags
+        id: tags
+        run: |
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-12)
+          BRANCH=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          echo "sha_tag=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "branch_tag=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ${{ env.IMAGE }}:${{ steps.tags.outputs.sha_tag }} \
+            -t ${{ env.IMAGE }}:${{ steps.tags.outputs.branch_tag }} \
+            ${{ github.ref_name == 'main' && format('-t {0}:latest', env.IMAGE) || '' }} \
+            .
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ env.IMAGE }}:${{ steps.tags.outputs.sha_tag }}
+          docker push ${{ env.IMAGE }}:${{ steps.tags.outputs.branch_tag }}
+          ${{ github.ref_name == 'main' && format('docker push {0}:latest', env.IMAGE) || 'true' }}
+
+  push-chart:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_name == 'main'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Helm for GCP Artifact Registry
+        run: gcloud auth print-access-token | helm registry login us-central1-docker.pkg.dev -u oauth2accesstoken --password-stdin
+
+      - name: Package and push Helm chart
+        run: |
+          helm package chart/
+          helm push runboat-*.tgz ${{ env.CHART_REPO }}

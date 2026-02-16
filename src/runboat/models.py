@@ -7,12 +7,45 @@ from typing import Optional
 from kubernetes.client.models.v1_deployment import V1Deployment
 from pydantic import BaseModel, ConfigDict
 
-from . import github, k8s
+from . import github, gitlab, k8s
 from .github import CommitInfo, GitHubStatusState
+from .gitlab import GitLabStatusState
 from .settings import settings
 from .utils import slugify
 
 _logger = logging.getLogger(__name__)
+
+# Mapping from GitHub status states to GitLab equivalents
+_GITHUB_TO_GITLAB_STATUS = {
+    GitHubStatusState.pending: GitLabStatusState.pending,
+    GitHubStatusState.success: GitLabStatusState.success,
+    GitHubStatusState.failure: GitLabStatusState.failed,
+    GitHubStatusState.error: GitLabStatusState.failed,
+}
+
+
+async def _notify_status(
+    commit_info: CommitInfo,
+    state: GitHubStatusState,
+    target_url: str | None,
+) -> None:
+    """Platform-aware status notification dispatch."""
+    if commit_info.platform == "gitlab":
+        gitlab_state = _GITHUB_TO_GITLAB_STATUS[state]
+        await gitlab.notify_status(
+            commit_info.repo,
+            commit_info.git_commit,
+            gitlab_state,
+            target_url,
+            project_id=commit_info.project_id,
+        )
+    else:
+        await github.notify_status(
+            commit_info.repo,
+            commit_info.git_commit,
+            state,
+            target_url,
+        )
 
 
 class BuildEvent(str, Enum):
@@ -83,6 +116,11 @@ class Build(BaseModel):
                 target_branch=deployment.metadata.annotations["runboat/target-branch"],
                 pr=deployment.metadata.annotations.get("runboat/pr") or None,
                 git_commit=deployment.metadata.annotations["runboat/git-commit"],
+                platform=deployment.metadata.annotations.get(
+                    "runboat/platform", "github"
+                ),
+                project_id=deployment.metadata.annotations.get("runboat/project-id")
+                or None,
             ),
             init_status=deployment.metadata.annotations["runboat/init-status"],
             status=cls._status_from_deployment(deployment),
@@ -122,7 +160,8 @@ class Build(BaseModel):
     ) -> str:
         slug = f"{slugify(commit_info.repo)}-{slugify(commit_info.target_branch)}"
         if commit_info.pr:
-            slug = f"{slug}-pr{slugify(commit_info.pr)}"
+            prefix = "mr" if commit_info.platform == "gitlab" else "pr"
+            slug = f"{slug}-{prefix}{slugify(commit_info.pr)}"
         slug = f"{slug}-{commit_info.git_commit[:12]}"
         return slug
 
@@ -132,16 +171,27 @@ class Build(BaseModel):
 
     @property
     def deploy_link(self) -> str:
-        return f"http://{self.slug}.{settings.build_domain}"
+        return f"https://{self.slug}.{settings.build_domain}"
 
     @property
     def deploy_link_mailhog(self) -> str:
-        return f"http://{self.slug}.mail.{settings.build_domain}"
+        return f"https://{self.slug}.mail.{settings.build_domain}"
+
+    @property
+    def _repo_base_url(self) -> str:
+        if self.commit_info.platform == "gitlab":
+            return f"{settings.gitlab_url}/{self.commit_info.repo}"
+        return f"https://github.com/{self.commit_info.repo}"
 
     @property
     def repo_target_branch_link(self) -> str:
+        if self.commit_info.platform == "gitlab":
+            return (
+                f"{self._repo_base_url}"
+                f"/-/tree/{self.commit_info.target_branch}"
+            )
         return (
-            f"https://github.com/{self.commit_info.repo}"
+            f"{self._repo_base_url}"
             f"/tree/{self.commit_info.target_branch}"
         )
 
@@ -149,18 +199,23 @@ class Build(BaseModel):
     def repo_pr_link(self) -> str | None:
         if not self.commit_info.pr:
             return None
-        return f"https://github.com/{self.commit_info.repo}/pull/{self.commit_info.pr}"
+        if self.commit_info.platform == "gitlab":
+            return (
+                f"{self._repo_base_url}"
+                f"/-/merge_requests/{self.commit_info.pr}"
+            )
+        return f"{self._repo_base_url}/pull/{self.commit_info.pr}"
 
     @property
     def repo_commit_link(self) -> str:
-        link = f"https://github.com/{self.commit_info.repo}"
+        if self.commit_info.platform == "gitlab":
+            return f"{self._repo_base_url}/-/commit/{self.commit_info.git_commit}"
         if self.commit_info.pr:
             return (
-                f"{link}/pull/{self.commit_info.pr}"
+                f"{self._repo_base_url}/pull/{self.commit_info.pr}"
                 f"/commits/{self.commit_info.git_commit}"
             )
-        else:
-            return f"{link}/commit/{self.commit_info.git_commit}"
+        return f"{self._repo_base_url}/commit/{self.commit_info.git_commit}"
 
     @property
     def webui_link(self) -> str:
@@ -205,12 +260,7 @@ class Build(BaseModel):
         await cls._deploy(
             commit_info, name, slug, job_kind=k8s.DeploymentMode.deployment
         )
-        await github.notify_status(
-            commit_info.repo,
-            commit_info.git_commit,
-            GitHubStatusState.pending,
-            target_url=None,
-        )
+        await _notify_status(commit_info, GitHubStatusState.pending, target_url=None)
 
     async def start(self) -> None:
         """Start build if init succeeded, or reinitialize if failed."""
@@ -305,11 +355,8 @@ class Build(BaseModel):
             return
         _logger.info(f"Initialization job started for {self}.")
         if await self._patch(init_status=BuildInitStatus.started, desired_replicas=0):
-            await github.notify_status(
-                self.commit_info.repo,
-                self.commit_info.git_commit,
-                GitHubStatusState.pending,
-                target_url=self.live_link,
+            await _notify_status(
+                self.commit_info, GitHubStatusState.pending, self.live_link
             )
 
     async def on_initialize_succeeded(self) -> None:
@@ -325,11 +372,8 @@ class Build(BaseModel):
             job_kind=k8s.DeploymentMode.stop,
         )
         if await self._patch(init_status=BuildInitStatus.succeeded):
-            await github.notify_status(
-                self.commit_info.repo,
-                self.commit_info.git_commit,
-                GitHubStatusState.success,
-                target_url=self.live_link,
+            await _notify_status(
+                self.commit_info, GitHubStatusState.success, self.live_link
             )
 
     async def on_initialize_failed(self) -> None:
@@ -345,11 +389,8 @@ class Build(BaseModel):
             job_kind=k8s.DeploymentMode.stop,
         )
         if await self._patch(init_status=BuildInitStatus.failed, desired_replicas=0):
-            await github.notify_status(
-                self.commit_info.repo,
-                self.commit_info.git_commit,
-                GitHubStatusState.failure,
-                target_url=self.live_link,
+            await _notify_status(
+                self.commit_info, GitHubStatusState.failure, self.live_link
             )
 
     async def on_cleanup_started(self) -> None:
@@ -415,7 +456,10 @@ class Repo(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     name: str
+    platform: str = "github"
 
     @property
     def link(self) -> str:
+        if self.platform == "gitlab":
+            return f"{settings.gitlab_url}/{self.name}"
         return f"https://github.com/{self.name}"

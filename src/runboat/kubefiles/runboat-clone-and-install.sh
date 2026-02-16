@@ -13,7 +13,26 @@ rm -fr $ADDONS_DIR
 # which exceeded the default pod memory limit.
 mkdir -p $ADDONS_DIR
 cd $ADDONS_DIR
-curl -sSL https://github.com/${RUNBOAT_GIT_REPO}/tarball/${RUNBOAT_GIT_REF} | tar zxf - --strip-components=1
+
+if [[ "${RUNBOAT_PLATFORM}" == "gitlab" ]]; then
+    # GitLab archive API: /projects/:id/repository/archive.tar.gz?sha=:ref
+    # Use project_id if available, otherwise URL-encode the repo path
+    if [[ -n "${RUNBOAT_PROJECT_ID}" ]]; then
+        ARCHIVE_URL="${RUNBOAT_GITLAB_URL}/api/v4/projects/${RUNBOAT_PROJECT_ID}/repository/archive.tar.gz?sha=${RUNBOAT_GIT_REF}"
+    else
+        ENCODED_REPO=$(echo "${RUNBOAT_GIT_REPO}" | sed 's|/|%2F|g')
+        ARCHIVE_URL="${RUNBOAT_GITLAB_URL}/api/v4/projects/${ENCODED_REPO}/repository/archive.tar.gz?sha=${RUNBOAT_GIT_REF}"
+    fi
+    # Use Bearer auth if RUNBOAT_GITLAB_TOKEN is set (for private repos)
+    if [[ -n "${RUNBOAT_GITLAB_TOKEN}" ]]; then
+        curl -sSL -H "Authorization: Bearer ${RUNBOAT_GITLAB_TOKEN}" "${ARCHIVE_URL}" | tar zxf - --strip-components=1
+    else
+        curl -sSL "${ARCHIVE_URL}" | tar zxf - --strip-components=1
+    fi
+else
+    # GitHub tarball URL
+    curl -sSL https://github.com/${RUNBOAT_GIT_REPO}/tarball/${RUNBOAT_GIT_REF} | tar zxf - --strip-components=1
+fi
 
 # Install.
 INSTALL_METHOD=${INSTALL_METHOD:-oca_install_addons}

@@ -154,6 +154,7 @@ class DeploymentVars(BaseModel):
     build_env: dict[str, str]
     build_secret_env: dict[str, str]
     build_template_vars: dict[str, str]
+    gitlab_url: str = "https://gitlab.com"
 
 
 def make_deployment_vars(
@@ -176,6 +177,7 @@ def make_deployment_vars(
         build_env=settings.build_env | build_settings.env,
         build_secret_env=settings.build_secret_env | build_settings.secret_env,
         build_template_vars=settings.build_template_vars | build_settings.template_vars,
+        gitlab_url=settings.gitlab_url,
     )
 
 

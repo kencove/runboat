@@ -30,6 +30,8 @@ class RepoSettings(BaseModel):
     repo: str  # regex
     branch: str  # regex
     builds: list[BuildSettings]
+    platform: str = "github"  # "github" or "gitlab"
+    project_id: str | None = None  # GitLab numeric project ID
 
     @field_validator("builds")
     def validate_builds(cls, v: list[BuildSettings]) -> list[BuildSettings]:
@@ -75,6 +77,12 @@ class Settings(BaseSettings):
     github_token: str | None = None
     # The secret used to verify GitHub webhook signatures
     github_webhook_secret: bytes | None = None
+    # The token to use for GitLab API calls (PRIVATE-TOKEN).
+    gitlab_token: str | None = None
+    # Plain token for GitLab webhook verification (X-Gitlab-Token header).
+    gitlab_webhook_token: str | None = None
+    # Base URL for GitLab instance (supports self-hosted).
+    gitlab_url: str = "https://gitlab.com"
     # The file with the python logging configuration to use for the runboat controller.
     log_config: str | None = None
     # The base url where the runboat UI and API is exposed on internet.
@@ -111,6 +119,17 @@ class Settings(BaseSettings):
             return False
         else:
             return True
+
+    def get_repo_settings(self, repo: str, target_branch: str) -> RepoSettings:
+        for repo_settings in self.repos:
+            if not re.match(repo_settings.repo, repo, re.IGNORECASE):
+                continue
+            if not re.match(repo_settings.branch, target_branch):
+                continue
+            return repo_settings
+        raise RepoOrBranchNotSupported(
+            f"Branch {target_branch} of {repo} not supported."
+        )
 
 
 settings = Settings()
