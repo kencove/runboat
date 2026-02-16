@@ -9,10 +9,11 @@ from pydantic import BaseModel, ConfigDict
 from sse_starlette.sse import EventSourceResponse
 from starlette.status import HTTP_404_NOT_FOUND
 
-from . import github, models
+from . import github, gitlab, models
 from .controller import Controller, controller
 from .db import SortOrder
 from .deps import authenticated
+from .settings import settings
 
 router = APIRouter()
 
@@ -108,7 +109,16 @@ async def undeploy_builds(
 )
 async def trigger_branch(repo: str, branch: str) -> None:
     """Trigger build for a branch."""
-    commit_info = await github.get_branch_info(repo, branch)
+    try:
+        repo_settings = settings.get_repo_settings(repo, branch)
+    except Exception:
+        repo_settings = None
+    if repo_settings and repo_settings.platform == "gitlab":
+        commit_info = await gitlab.get_branch_info(
+            repo, branch, project_id=repo_settings.project_id
+        )
+    else:
+        commit_info = await github.get_branch_info(repo, branch)
     await controller.deploy_commit(commit_info)
 
 
@@ -119,6 +129,18 @@ async def trigger_branch(repo: str, branch: str) -> None:
 async def trigger_pull(repo: str, pr: int) -> None:
     """Trigger build for a pull request."""
     commit_info = await github.get_pull_info(repo, pr)
+    await controller.deploy_commit(commit_info)
+
+
+@router.post(
+    "/builds/trigger/mr",
+    dependencies=[Depends(authenticated)],
+)
+async def trigger_merge_request(
+    repo: str, mr: int, project_id: str | None = None
+) -> None:
+    """Trigger build for a GitLab merge request."""
+    commit_info = await gitlab.get_merge_request_info(repo, mr, project_id=project_id)
     await controller.deploy_commit(commit_info)
 
 

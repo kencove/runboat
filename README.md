@@ -2,26 +2,29 @@
 
 A simple Odoo runbot lookalike on kubernetes. Main goal is replacing the OCA runbot.
 
-[![pre-commit.ci status](https://results.pre-commit.ci/badge/github/sbidoul/runboat/main.svg)](https://results.pre-commit.ci/latest/github/sbidoul/runboat/main)
+This fork adds **GitLab support** (webhooks, API, commit statuses) alongside the
+existing GitHub support, plus a **Helm chart** for deployment.
 
 ## Principle of operation
 
 This program is a Kubernetes operator that manages Odoo instances with pre-installed
-addons. The addons come from commits on branches and pull requests in GitHub
-repositories. A deployment of a given commit of a given branch or pull request of a
-given repository is known as a build.
+addons. The addons come from commits on branches and pull/merge requests in GitHub
+or GitLab repositories. A deployment of a given commit of a given branch or
+pull/merge request of a given repository is known as a build.
 
 Runboat has the following main components:
 
 - An in-memory database of deployed builds, with their current status.
 - A REST API to list builds and trigger new deployments as well as start, stop, redeploy
   or undeploy builds.
-- A GitHub webhook to automatically trigger new builds on pushes to branches and pull
-  requests of supported repositories and branches (configured via regular expressions).
+- **GitHub webhook** (`/webhooks/github`) to automatically trigger builds on pushes and
+  pull requests.
+- **GitLab webhook** (`/webhooks/gitlab`) to automatically trigger builds on pushes and
+  merge requests.
 - A controller that performs the following tasks:
 
-  - monitor deployments in a kubernetes namespaces to maintain the in-memory database;
-  - on new deployments, trigger an initialization job to check out the GitHub repo,
+  - monitor deployments in a kubernetes namespace to maintain the in-memory database;
+  - on new deployments, trigger an initialization job to check out the repo,
     install dependencies, create the corresponding postgres database and install the
     addons in it;
   - initialization jobs are started concurrently up to a configured limit;
@@ -49,6 +52,40 @@ knowledge about *what* is deployed is in the
 a specific contract to be managed by the runboat controller. This contract is described
 in the [Kubernetes resources](#kubernetes-resources) section below.
 
+## What's new in this fork
+
+### GitLab support
+
+GitLab support works alongside GitHub — both can be active simultaneously:
+
+| Feature | GitHub | GitLab |
+|---------|--------|--------|
+| Webhook endpoint | `/webhooks/github` | `/webhooks/gitlab` |
+| Webhook auth | HMAC-SHA256 signature | `X-Gitlab-Token` header |
+| Push events | `push` | `Push Hook` |
+| PR/MR events | `pull_request` | `Merge Request Hook` |
+| Commit statuses | `POST /repos/{owner}/{repo}/statuses/{sha}` | `POST /api/v4/projects/{id}/statuses/{sha}` |
+| Repo clone | GitHub tarball URL | GitLab archive API (supports private repos) |
+| API trigger | `POST /api/v1/builds/trigger/pr` | `POST /api/v1/builds/trigger/mr` |
+
+Configuration per repo (`RUNBOAT_REPOS`):
+```json
+[
+  {
+    "repo": "^myorg/myrepo$",
+    "branch": "^16\\.0$",
+    "platform": "gitlab",
+    "project_id": "12345678",
+    "builds": [{"image": "ghcr.io/oca/oca-ci/py3.10-odoo16.0:latest"}]
+  }
+]
+```
+
+### Helm chart
+
+A Helm chart is included in `chart/` for deploying Runboat and its PostgreSQL
+dependency to Kubernetes. See [Helm deployment](#helm-deployment) below.
+
 ## Requirements
 
 For running the builds:
@@ -72,7 +109,104 @@ For running the controller (runboat itself):
 The controller can be run outside the kubernetes cluster or deployed inside it, or even
 in a different cluster.
 
-## Deployment quickstart
+## Helm deployment
+
+The included Helm chart (`chart/`) deploys Runboat with all dependencies:
+
+### Prerequisites
+
+- Kubernetes 1.24+
+- Helm 3.x
+- nginx-ingress controller
+- cert-manager (for TLS)
+- CNPG operator (for managed PostgreSQL, or use external PG)
+- Wildcard DNS pointing to your ingress load balancer
+
+### Quick start
+
+```bash
+# 1. Create namespaces
+kubectl create namespace runboat
+kubectl create namespace runboat-builds
+
+# 2. Create your values override
+cat > my-values.yaml <<EOF
+image:
+  repository: ghcr.io/your-org/runboat
+  tag: latest
+
+ingress:
+  host: runboat.example.com
+
+postgresql:
+  password: "$(openssl rand -hex 16)"
+  cnpg:
+    superuserPassword: "$(openssl rand -hex 16)"
+
+config:
+  apiAdminPassword: "$(openssl rand -hex 16)"
+  buildDomain: runboat.example.com
+  baseUrl: https://runboat.example.com
+
+github:
+  token: "ghp_your_token_here"
+  webhookSecret: "$(openssl rand -hex 20)"
+
+gitlab:
+  token: "glpat-your_token_here"
+  webhookToken: "$(openssl rand -hex 16)"
+
+repos:
+  - repo: "^oca/.*"
+    branch: "^16\\.0$"
+    platform: github
+    builds:
+      - image: "ghcr.io/oca/oca-ci/py3.10-odoo16.0:latest"
+EOF
+
+# 3. Install
+helm install runboat ./chart -n runboat -f my-values.yaml
+
+# 4. Create wildcard cert for build ingresses (requires DNS-01 solver)
+kubectl apply -f - <<EOF
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: runboat-builds-wildcard
+  namespace: runboat-builds
+spec:
+  secretName: runboat-builds-wildcard-tls
+  dnsNames:
+    - "*.runboat.example.com"
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+EOF
+
+# 5. Configure webhooks on your repos
+# GitHub: Settings > Webhooks > Add webhook
+#   URL: https://runboat.example.com/webhooks/github
+#   Secret: <your webhook secret>
+#   Events: Pushes, Pull requests
+#
+# GitLab: Settings > Webhooks > Add new webhook
+#   URL: https://runboat.example.com/webhooks/gitlab
+#   Secret token: <your webhook token>
+#   Triggers: Push events, Merge request events
+```
+
+### Upgrading
+
+```bash
+helm upgrade runboat ./chart -n runboat -f my-values.yaml
+```
+
+### Configuration reference
+
+See [`chart/values.yaml`](./chart/values.yaml) for all available settings with
+inline documentation.
+
+## Deployment quickstart (docker-compose)
 
 A typical deployment looks like this.
 
@@ -134,7 +268,7 @@ actually deploy. It expects the following to hold true:
   - `runboat/pr`: the pull request number if this build is for a pull request;
   - `runboat/git-commit`: the commit sha.
 
-- the home page of a running build is exposed at `http://{build_slug}.{build_domain}`.
+- the home page of a running build is exposed at `https://{build_slug}.{build_domain}`.
 
 During the lifecycle of a build, the controller does the following on the deployed
 resources:
@@ -195,9 +329,11 @@ See environment variables examples in [Dockerfile](./Dockerfile),
 
 ## Credits
 
-Authored by Stéphane Bidoul (@sbidoul) and
+Authored by Stephane Bidoul (@sbidoul) and
 [contributors](https://github.com/sbidoul/runboat/graphs/contributors) with support of
 [ACSONE](https://acsone.eu).
+
+GitLab support and Helm chart by [Kencove](https://kencove.com).
 
 Contributions welcome.
 

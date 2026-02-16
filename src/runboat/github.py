@@ -31,6 +31,8 @@ class CommitInfo(BaseModel):
     target_branch: str
     pr: int | None
     git_commit: str
+    platform: str = "github"  # "github" or "gitlab"
+    project_id: str | None = None  # GitLab numeric project ID
 
     @field_validator("repo")
     def validate_repo(cls, v: str) -> str:

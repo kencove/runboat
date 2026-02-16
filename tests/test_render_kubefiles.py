@@ -25,6 +25,8 @@ commonAnnotations:
   runboat/target-branch: "15.0"
   runboat/pr: ""
   runboat/git-commit: "abcdef123456789"
+  runboat/platform: "github"
+  runboat/project-id: ""
 
 images:
   - name: odoo
@@ -46,6 +48,9 @@ configMapGenerator:
       - ADDONS_DIR=/mnt/data/odoo-addons-dir
       - RUNBOAT_GIT_REPO=oca/mis-builder
       - RUNBOAT_GIT_REF=abcdef123456789
+      - RUNBOAT_PLATFORM=github
+      - RUNBOAT_PROJECT_ID=
+      - RUNBOAT_GITLAB_URL=https://gitlab.com
   - name: runboat-scripts
     files:
       - runboat-clone-and-install.sh
