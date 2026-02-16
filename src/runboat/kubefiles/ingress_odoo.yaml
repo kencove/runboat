@@ -3,6 +3,9 @@ kind: Ingress
 metadata:
   name: odoo
 spec:
+  ingressClassName: nginx
+  tls:
+    - secretName: runboat-builds-wildcard-tls
   rules:
     - http:
         paths:
